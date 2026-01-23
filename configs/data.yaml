@@ -1,0 +1,22 @@
+# YOLO Dataset Configuration
+# For training YOLOv8 on UML Class Diagram Dataset
+# Class names match the original dataset's data.yaml
+
+# Dataset paths (relative to this file)
+# After kagglehub download, update these paths to point to the cached dataset
+path: ~/.cache/kagglehub/datasets/domenicoarm/uml-class-diagram-dataset-bounded-box-rating/versions/2/UML_YOLOv8
+train: train/images
+val: valid/images
+test: test/images
+
+# Number of classes
+nc: 3
+
+# Class names (IMPORTANT: order matches data.yaml from Kaggle dataset)
+# 0: arrow - Relationship arrows between classes
+# 1: class - UML class boxes
+# 2: cross - Cross markers
+names:
+  - arrow
+  - class
+  - cross
