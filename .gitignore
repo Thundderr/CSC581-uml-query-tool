@@ -96,7 +96,7 @@ dmypy.json
 # Data and models (large files)
 data/raw/
 data/processed/
-models/
+models/*
 *.h5
 *.hdf5
 *.pkl
@@ -108,6 +108,9 @@ models/
 
 # Keep sample data tracked
 !data/sample/.gitkeep
+
+# Keep the trained model for deployment
+!models/uml_detector_best.pt
 
 # Training runs (large output files)
 runs/
