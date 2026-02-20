@@ -122,3 +122,7 @@ kaggle.json
 # Logs
 logs/
 *.log
+
+# Test debug output
+tests/debug_output/
+tests/real_arrow_results.json

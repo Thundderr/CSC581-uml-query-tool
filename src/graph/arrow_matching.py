@@ -172,7 +172,7 @@ def _extract_endpoints_from_mask(
     # Mask out class-box regions
     if class_bboxes:
         fg_before = fg_mask.copy()
-        for pad in (2, 0):
+        for pad in (4, 2):
             fg_mask = fg_before.copy()
             for cb in class_bboxes:
                 cb_x1 = max(0, cb['x1'] - pad - x1c)
@@ -183,7 +183,7 @@ def _extract_endpoints_from_mask(
                     fg_mask[cb_y1:cb_y2, cb_x1:cb_x2] = 0
             if cv2.countNonZero(fg_mask) >= min_foreground_pixels:
                 break
-            if pad == 0 and cv2.countNonZero(fg_mask) < min_foreground_pixels:
+            if pad == 2 and cv2.countNonZero(fg_mask) < min_foreground_pixels:
                 fg_mask = fg_before
 
     # Bridge dashed lines if fragmented
