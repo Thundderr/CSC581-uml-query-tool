@@ -151,6 +151,178 @@ def _trace_skeleton_path(
 
 
 # ---------------------------------------------------------------------------
+# Core: extract endpoints from a foreground mask
+# ---------------------------------------------------------------------------
+
+def _extract_endpoints_from_mask(
+    fg_mask: np.ndarray,
+    class_bboxes: Optional[List[Dict[str, int]]],
+    x1c: int, y1c: int,
+    ch: int, cw: int,
+    min_foreground_pixels: int,
+) -> Optional[Dict]:
+    """
+    Given a binary foreground mask (crop-local), mask class boxes, select
+    the best component, skeletonize, and return endpoints + trace.
+
+    Returns dict with crop-local ``ep_a``, ``ep_b``, ``trace`` keys, or None.
+    """
+    cy, cx = ch // 2, cw // 2
+
+    # Mask out class-box regions
+    if class_bboxes:
+        fg_before = fg_mask.copy()
+        for pad in (2, 0):
+            fg_mask = fg_before.copy()
+            for cb in class_bboxes:
+                cb_x1 = max(0, cb['x1'] - pad - x1c)
+                cb_y1 = max(0, cb['y1'] - pad - y1c)
+                cb_x2 = min(cw, cb['x2'] + pad - x1c)
+                cb_y2 = min(ch, cb['y2'] + pad - y1c)
+                if cb_x1 < cb_x2 and cb_y1 < cb_y2:
+                    fg_mask[cb_y1:cb_y2, cb_x1:cb_x2] = 0
+            if cv2.countNonZero(fg_mask) >= min_foreground_pixels:
+                break
+            if pad == 0 and cv2.countNonZero(fg_mask) < min_foreground_pixels:
+                fg_mask = fg_before
+
+    # Bridge dashed lines if fragmented
+    num_labels_pre, _ = cv2.connectedComponents(fg_mask)
+    if num_labels_pre > 3:
+        fg_mask = cv2.dilate(
+            fg_mask,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            iterations=1,
+        )
+
+    # Line filter: open along BOTH axes and union results to remove text
+    # blobs while preserving L-shaped arrows.  A single-direction kernel
+    # would destroy the perpendicular leg of an L-shaped arrow.
+    # After the union, close small gaps to reconnect corners where both
+    # openings eroded the turn of an L-shape.
+    fg_total = cv2.countNonZero(fg_mask)
+    if fg_total > max(cw, ch) * 3 and cw >= 20 and ch >= 20:
+        h_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (max(7, cw // 15), 1))
+        v_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(7, ch // 15)))
+        fg_h = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, h_kern)
+        fg_v = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, v_kern)
+        fg_filtered = cv2.bitwise_or(fg_h, fg_v)
+        # Bridge the corner gap: each opening erodes ~half-kernel pixels
+        # at L-shaped turns.  The gap is diagonal so use Pythagorean distance.
+        h_half = h_kern.shape[1] // 2
+        v_half = v_kern.shape[0] // 2
+        gap = int(np.sqrt(h_half ** 2 + v_half ** 2)) + 2
+        close_kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (gap, gap))
+        fg_filtered = cv2.morphologyEx(fg_filtered, cv2.MORPH_CLOSE, close_kern)
+        if cv2.countNonZero(fg_filtered) >= min_foreground_pixels:
+            fg_mask = fg_filtered
+
+    # Largest connected component near centre, then merge nearby components
+    # to reassemble L-shaped arrows whose legs were split by the line filter.
+    num_labels, labels = cv2.connectedComponents(fg_mask)
+    if num_labels <= 1:
+        return None
+
+    center_radius = max(ch, cw) * 0.4
+    best_label = -1
+    best_size = 0
+    for label in range(1, num_labels):
+        coords = np.column_stack(np.where(labels == label))
+        if len(coords) < min_foreground_pixels:
+            continue
+        dists = np.sqrt((coords[:, 0] - cy) ** 2 + (coords[:, 1] - cx) ** 2)
+        if dists.min() > center_radius:
+            continue
+        if len(coords) > best_size:
+            best_size = len(coords)
+            best_label = label
+
+    if best_label < 0:
+        return None
+
+    arrow_mask = (labels == best_label).astype(np.uint8) * 255
+
+    # Merge nearby components: dilate the selected component and absorb
+    # any other *significant* component it touches.  This reconnects legs
+    # of L-shaped arrows that were split at the corner by the line filter.
+    # Only merge components that are at least 25% of the main component's
+    # size to avoid absorbing small text/noise blobs.
+    merge_radius = max(ch, cw) // 8
+    merge_min_size = max(min_foreground_pixels, best_size // 4)
+    merged_any = False
+    if merge_radius > 0 and num_labels > 2:
+        merge_kern = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * merge_radius + 1, 2 * merge_radius + 1))
+        dilated = cv2.dilate(arrow_mask, merge_kern)
+        for label in range(1, num_labels):
+            if label == best_label:
+                continue
+            comp = (labels == label).astype(np.uint8) * 255
+            if cv2.countNonZero(comp) < merge_min_size:
+                continue
+            if cv2.countNonZero(cv2.bitwise_and(dilated, comp)) > 0:
+                arrow_mask = cv2.bitwise_or(arrow_mask, comp)
+                merged_any = True
+
+    # If we merged disconnected components, bridge the gaps between them
+    # so the skeleton will be a single connected curve.  Use progressive
+    # dilation to find the smallest bridge, avoiding over-thickening.
+    if merged_any:
+        n_comp, _ = cv2.connectedComponents(arrow_mask)
+        if n_comp > 2:  # more than one component
+            for r in range(1, merge_radius + 1):
+                bridged = cv2.dilate(
+                    arrow_mask, np.ones((3, 3), np.uint8), iterations=r)
+                n_comp2, _ = cv2.connectedComponents(bridged)
+                if n_comp2 <= 2:
+                    arrow_mask = bridged
+                    break
+
+    if cv2.countNonZero(arrow_mask) < min_foreground_pixels:
+        return None
+
+    # Skeletonize
+    skeleton = _skeletonize(arrow_mask)
+    if cv2.countNonZero(skeleton) < 2:
+        return None
+
+    # Endpoints via convex hull of skeleton pixels (most-distant pair)
+    skel_coords = np.column_stack(np.where(skeleton > 0))[:, ::-1].astype(np.int32)
+    if len(skel_coords) < 2:
+        return None
+    hull = cv2.convexHull(skel_coords.reshape(-1, 1, 2))
+    hull_pts = hull.reshape(-1, 2)
+    if len(hull_pts) < 2:
+        return None
+
+    best_d = 0
+    pt_a, pt_b = hull_pts[0], hull_pts[-1]
+    for i in range(len(hull_pts)):
+        for j in range(i + 1, len(hull_pts)):
+            dx = int(hull_pts[i][0]) - int(hull_pts[j][0])
+            dy = int(hull_pts[i][1]) - int(hull_pts[j][1])
+            d = dx * dx + dy * dy
+            if d > best_d:
+                best_d = d
+                pt_a, pt_b = hull_pts[i], hull_pts[j]
+    ep_a = (int(pt_a[0]), int(pt_a[1]))
+    ep_b = (int(pt_b[0]), int(pt_b[1]))
+
+    # Trace path — progressively dilate the skeleton to bridge micro-gaps
+    # left by skeletonization of thick/merged masks.
+    trace = _trace_skeleton_path(skeleton, ep_a, ep_b)
+    if len(trace) <= 2:
+        for bridge_iter in range(1, 6):
+            bridge = cv2.dilate(skeleton, np.ones((3, 3), np.uint8),
+                                iterations=bridge_iter)
+            trace = _trace_skeleton_path(bridge, ep_a, ep_b)
+            if len(trace) > 2:
+                break
+
+    return {'ep_a': ep_a, 'ep_b': ep_b, 'trace': trace}
+
+
+# ---------------------------------------------------------------------------
 # Main pixel-based endpoint + trace detection
 # ---------------------------------------------------------------------------
 
@@ -158,24 +330,15 @@ def find_arrow_endpoints_from_pixels(
     image: np.ndarray,
     arrow_bbox: Dict[str, int],
     class_bboxes: Optional[List[Dict[str, int]]] = None,
-    color_diff_threshold: float = 30.0,
-    min_foreground_pixels: int = 10,
+    color_diff_threshold: float = 50.0,
+    min_foreground_pixels: int = 15,
 ) -> Optional[Dict]:
     """
     Trace the arrow line within its bounding box using pixel analysis.
 
-    Pipeline:
-      1. Crop the arrow bbox region.
-      2. Estimate background colour from the centre 50 % of the crop.
-      3. Build foreground mask via colour distance.
-      4. Mask out known class-box regions (removes box borders that
-         overlap with the arrow bbox).
-      5. Connected-component analysis — pick the component nearest the
-         crop centre (= the arrow line).
-      6. Skeletonize to a 1-pixel-wide path.
-      7. Find skeleton endpoints and BFS-trace the path between them.
-      8. Convert to full-image coordinates.
-      9. Validate that endpoints straddle a bbox midline.
+    Tries two detection strategies:
+      1. **Colour distance** — estimate background, threshold, skeletonize.
+      2. **Edge detection** (Canny) — fallback for low-contrast or noisy images.
 
     Args:
         image: Full BGR uint8 image
@@ -185,14 +348,12 @@ def find_arrow_endpoints_from_pixels(
         min_foreground_pixels: Minimum foreground pixels required
 
     Returns:
-        Dict with keys ``endpoint_a``, ``endpoint_b`` (each ``(x, y)``),
-        and ``trace_points`` (ordered list of ``(x, y)`` skeleton pixels
-        in original image coordinates), or ``None``.
+        Dict with ``endpoint_a``, ``endpoint_b`` (each ``(x, y)``), and
+        ``trace_points`` (ordered skeleton pixels in image coords), or None.
     """
     x1, y1, x2, y2 = arrow_bbox['x1'], arrow_bbox['y1'], arrow_bbox['x2'], arrow_bbox['y2']
     h_img, w_img = image.shape[:2]
 
-    # Clamp to image bounds
     x1c, y1c = max(0, x1), max(0, y1)
     x2c, y2c = min(w_img, x2), min(h_img, y2)
 
@@ -201,136 +362,77 @@ def find_arrow_endpoints_from_pixels(
     if ch < 5 or cw < 5:
         return None
 
-    cy, cx = ch // 2, cw // 2
-
-    # --- Step 1: Background from centre 50 % of crop ---
+    # ---- Strategy 1: Colour distance (try primary + alternate thresholds) ----
     q1y, q3y = ch // 4, 3 * ch // 4
     q1x, q3x = cw // 4, 3 * cw // 4
     center_region = crop[q1y:q3y, q1x:q3x].reshape(-1, 3)
     bg_color = np.median(center_region, axis=0).astype(np.float32)
 
-    # --- Step 2: Foreground mask via colour distance ---
     diff = crop.astype(np.float32) - bg_color[np.newaxis, np.newaxis, :]
     dist = np.sqrt(np.sum(diff ** 2, axis=2))
-    fg_mask = (dist >= color_diff_threshold).astype(np.uint8) * 255
 
-    # --- Step 3: Morphological cleanup ---
     kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel_close)
     kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel_open)
 
-    # --- Step 4: Mask out known class-box regions ---
-    # This surgically removes class box borders that overlap with the
-    # arrow bbox, leaving only the arrow line pixels.  We pad the class
-    # bbox by a few pixels to also catch border pixels at the box edge.
-    if class_bboxes:
-        pad = 4
-        for cb in class_bboxes:
-            cb_x1 = max(0, cb['x1'] - pad - x1c)
-            cb_y1 = max(0, cb['y1'] - pad - y1c)
-            cb_x2 = min(cw, cb['x2'] + pad - x1c)
-            cb_y2 = min(ch, cb['y2'] + pad - y1c)
-            if cb_x1 < cb_x2 and cb_y1 < cb_y2:
-                fg_mask[cb_y1:cb_y2, cb_x1:cb_x2] = 0
-
-    # --- Step 5: Connected component nearest to centre ---
-    num_labels, labels = cv2.connectedComponents(fg_mask)
-    if num_labels <= 1:
-        return None
-
-    best_label = -1
-    best_center_dist = float('inf')
-    for label in range(1, num_labels):
-        component_mask = (labels == label)
-        component_coords = np.column_stack(np.where(component_mask))
-        if len(component_coords) < min_foreground_pixels:
-            continue
-        dists_to_center = np.sqrt(
-            (component_coords[:, 0] - cy) ** 2 + (component_coords[:, 1] - cx) ** 2
+    result = None
+    for thresh in (color_diff_threshold, color_diff_threshold * 0.5, color_diff_threshold * 1.5):
+        fg_color = (dist >= thresh).astype(np.uint8) * 255
+        fg_color = cv2.morphologyEx(fg_color, cv2.MORPH_CLOSE, kernel_close)
+        fg_color = cv2.morphologyEx(fg_color, cv2.MORPH_OPEN, kernel_open)
+        result = _extract_endpoints_from_mask(
+            fg_color, class_bboxes, x1c, y1c, ch, cw, min_foreground_pixels,
         )
-        min_dist = dists_to_center.min()
-        if min_dist < best_center_dist:
-            best_center_dist = min_dist
-            best_label = label
+        if result is not None:
+            break
 
-    if best_label < 0:
+    # Fallback strategies use a lower pixel threshold since edge/adaptive
+    # methods produce thinner foreground.
+    fallback_min_fg = max(5, min_foreground_pixels // 2)
+
+    # Grayscale needed for fallback strategies
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+
+    # ---- Strategy 2: Edge detection (Canny) fallback ----
+    if result is None:
+        edges = cv2.Canny(gray, 50, 150)
+        edges = cv2.morphologyEx(
+            edges, cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        )
+        result = _extract_endpoints_from_mask(
+            edges, class_bboxes, x1c, y1c, ch, cw, fallback_min_fg,
+        )
+
+    # ---- Strategy 3: Adaptive threshold fallback ----
+    if result is None:
+        block_size = max(11, (min(ch, cw) // 4) | 1)  # ensure odd
+        fg_adapt = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, block_size, 5,
+        )
+        result = _extract_endpoints_from_mask(
+            fg_adapt, class_bboxes, x1c, y1c, ch, cw, fallback_min_fg,
+        )
+
+    # ---- Strategy 4: Otsu threshold fallback ----
+    if result is None:
+        _, fg_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        result = _extract_endpoints_from_mask(
+            fg_otsu, class_bboxes, x1c, y1c, ch, cw, fallback_min_fg,
+        )
+
+    if result is None:
         return None
 
-    arrow_mask = (labels == best_label).astype(np.uint8) * 255
-    if cv2.countNonZero(arrow_mask) < min_foreground_pixels:
-        return None
-
-    # --- Step 6: Skeletonize ---
-    skeleton = _skeletonize(arrow_mask)
-    if cv2.countNonZero(skeleton) < 2:
-        return None
-
-    # --- Step 7: Find skeleton endpoints & trace path ---
-    skel_eps = _find_skeleton_endpoints(skeleton)
-
-    if len(skel_eps) >= 2:
-        # Pick the two most-distant skeleton endpoints
-        if len(skel_eps) == 2:
-            ep_a_local, ep_b_local = skel_eps[0], skel_eps[1]
-        else:
-            best_d = 0
-            ep_a_local, ep_b_local = skel_eps[0], skel_eps[1]
-            for i in range(len(skel_eps)):
-                for j in range(i + 1, len(skel_eps)):
-                    dx = skel_eps[i][0] - skel_eps[j][0]
-                    dy = skel_eps[i][1] - skel_eps[j][1]
-                    d = dx * dx + dy * dy
-                    if d > best_d:
-                        best_d = d
-                        ep_a_local, ep_b_local = skel_eps[i], skel_eps[j]
-    else:
-        # Fallback: convex hull max-distance pair on skeleton pixels
-        skel_coords = np.column_stack(np.where(skeleton > 0))[:, ::-1].astype(np.int32)
-        if len(skel_coords) < 2:
-            return None
-        hull = cv2.convexHull(skel_coords.reshape(-1, 1, 2))
-        hull_pts = hull.reshape(-1, 2)
-        if len(hull_pts) < 2:
-            return None
-        best_d = 0
-        pt_a, pt_b = hull_pts[0], hull_pts[-1]
-        for i in range(len(hull_pts)):
-            for j in range(i + 1, len(hull_pts)):
-                dx = int(hull_pts[i][0]) - int(hull_pts[j][0])
-                dy = int(hull_pts[i][1]) - int(hull_pts[j][1])
-                d = dx * dx + dy * dy
-                if d > best_d:
-                    best_d = d
-                    pt_a, pt_b = hull_pts[i], hull_pts[j]
-        ep_a_local = (int(pt_a[0]), int(pt_a[1]))
-        ep_b_local = (int(pt_b[0]), int(pt_b[1]))
-
-    trace_local = _trace_skeleton_path(skeleton, ep_a_local, ep_b_local)
-
-    # If skeleton was disconnected (morphological thinning can create gaps),
-    # retry the trace on a slightly dilated version to bridge 1-2px gaps.
-    if len(trace_local) <= 2:
-        bridge = cv2.dilate(skeleton, np.ones((3, 3), np.uint8), iterations=1)
-        trace_local = _trace_skeleton_path(bridge, ep_a_local, ep_b_local)
-
-    # --- Step 8: Convert to original image coordinates ---
-    endpoint_a = (ep_a_local[0] + x1c, ep_a_local[1] + y1c)
-    endpoint_b = (ep_b_local[0] + x1c, ep_b_local[1] + y1c)
-    trace_points = [(x + x1c, y + y1c) for x, y in trace_local]
-
-    # --- Step 9: Midline validation ---
-    x_mid = (x1 + x2) / 2.0
-    y_mid = (y1 + y2) / 2.0
-    crosses_vertical = (endpoint_a[0] - x_mid) * (endpoint_b[0] - x_mid) <= 0
-    crosses_horizontal = (endpoint_a[1] - y_mid) * (endpoint_b[1] - y_mid) <= 0
-    if not crosses_vertical and not crosses_horizontal:
-        return None
+    # Convert to image coordinates
+    ep_a = (result['ep_a'][0] + x1c, result['ep_a'][1] + y1c)
+    ep_b = (result['ep_b'][0] + x1c, result['ep_b'][1] + y1c)
+    trace = [(x + x1c, y + y1c) for x, y in result['trace']]
 
     return {
-        'endpoint_a': endpoint_a,
-        'endpoint_b': endpoint_b,
-        'trace_points': trace_points,
+        'endpoint_a': ep_a,
+        'endpoint_b': ep_b,
+        'trace_points': trace,
     }
 
 
