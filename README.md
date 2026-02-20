@@ -2,25 +2,11 @@
 
 A tool for analyzing UML class diagrams using computer vision, OCR, and knowledge graph querying. Upload a UML diagram and ask questions about classes, relationships, and software architecture.
 
-## Project Overview
+## Requirements
 
-This project builds a 5-stage pipeline to make UML diagrams queryable:
-
-1. **Object Detection**: Use YOLOv8/SAM 2 to detect and segment classes, arrows, and relationships
-2. **OCR Extraction**: Extract text from detected class boxes (names, attributes, methods)
-3. **Knowledge Graph**: Convert extracted information into a queryable graph structure
-4. **GraphRAG Query**: Enable natural language queries about the UML diagrams
-5. **Interactive UI**: Streamlit/Gradio interface for uploading and querying diagrams
-
-## Dataset
-
-We use the [UML Class Diagram Dataset](https://www.kaggle.com/datasets/domenicoarm/uml-class-diagram-dataset-bounded-box-rating) from Kaggle:
-
-- ~650 UML class diagram images (JPG/PNG)
-- 134 MB total size
-- Annotations in YOLO (.txt) and Faster R-CNN (.xml) formats
-- Three annotation classes: Classes, Arrows, Crosses
-- Quality ratings for each diagram
+- **Python 3.12**
+- **Ollama** (for LLM queries) — [Install Ollama](https://ollama.com/download)
+- **NVIDIA GPU** (optional, but recommended) — CUDA-capable GPU for faster training and inference
 
 ## Installation
 
@@ -37,52 +23,90 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Quick Start
+### GPU Setup (CUDA)
+
+The default `pip install torch` gives you **CPU-only** PyTorch. For NVIDIA GPU support:
 
 ```bash
-# Launch Jupyter Lab
-jupyter lab
+# Windows/Linux with NVIDIA GPU:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+```
 
+Mac users with Apple Silicon get MPS acceleration automatically with the default install.
+
+Verify your GPU is detected:
+
+```python
+import torch
+print(torch.cuda.is_available())       # True for NVIDIA GPU
+print(torch.backends.mps.is_available()) # True for Apple Silicon
+```
+
+### Ollama Setup
+
+Install Ollama from [ollama.com](https://ollama.com/download), then pull a model:
+
+```bash
+ollama pull llama3
+ollama serve  # start the server (may already be running)
+```
+
+## Quick Start
+
+### Streamlit App (recommended)
+
+Upload any UML diagram image and query it with natural language:
+
+```bash
+streamlit run app.py
+```
+
+### Jupyter Notebooks
+
+Run the pipeline step by step:
+
+```bash
+jupyter lab
 # Open notebooks/01_dataset_exploration.ipynb to get started
 ```
+
+## Pipeline
+
+1. **Object Detection** (Notebook 02) — YOLOv8 detects class boxes, arrows, and crosses
+2. **OCR Extraction** (Notebook 03) — EasyOCR extracts text from detected class boxes
+3. **Knowledge Graph** (Notebook 04) — NetworkX graph built from classes and arrow relationships
+4. **GraphRAG Query** (`app.py`) — Natural language queries via Ollama LLM over the graph
 
 ## Project Structure
 
 ```
 CSC581-uml-query-tool/
+├── app.py                  # Streamlit GUI — upload & query UML diagrams
 ├── notebooks/              # Jupyter notebooks for each pipeline stage
-│   └── 01_dataset_exploration.ipynb
+│   ├── 01_dataset_exploration.ipynb
+│   ├── 02_object_detection.ipynb
+│   ├── 03_ocr_extraction.ipynb
+│   └── 04_knowledge_graph.ipynb
 ├── src/                    # Source code modules
-│   ├── detection/          # Object detection (YOLOv8, SAM)
-│   ├── ocr/                # Text extraction
-│   ├── graph/              # Knowledge graph construction
-│   ├── query/              # GraphRAG implementation
-│   └── utils/              # Shared utilities
-├── data/                   # Dataset (git-ignored)
-│   ├── raw/                # Downloaded dataset
-│   ├── processed/          # Processed outputs
-│   └── sample/             # Small sample for testing
-├── models/                 # Trained models (git-ignored)
+│   ├── detection/          # Object detection
+│   ├── ocr/                # Text extraction (EasyOCR + PyTesseract)
+│   ├── graph/              # Knowledge graph construction & arrow matching
+│   ├── query/              # GraphRAG engine (Ollama LLM)
+│   └── utils/              # Device selection, data loading
+├── data/                   # Dataset & processed outputs (git-ignored)
+├── models/                 # Trained YOLO weights (git-ignored)
 ├── configs/                # Configuration files
-└── ui/                     # User interface
+└── requirements.txt
 ```
 
-## Pipeline Stages
+## Dataset
 
-### Stage 1: Object Detection
-Detect bounding boxes for classes and arrows in UML diagrams using YOLOv8 or SAM 2.
+[UML Class Diagram Dataset](https://www.kaggle.com/datasets/domenicoarm/uml-class-diagram-dataset-bounded-box-rating) from Kaggle:
 
-### Stage 2: OCR Extraction
-Read text content from detected class boxes using Tesseract or EasyOCR.
-
-### Stage 3: Knowledge Graph
-Build a graph representation of classes and their relationships.
-
-### Stage 4: GraphRAG Query
-Query the knowledge graph using natural language with an LLM.
-
-### Stage 5: User Interface
-Web-based interface for uploading diagrams and asking questions.
+- ~650 UML class diagram images
+- Annotations in YOLO and PASCAL VOC formats
+- Three classes: arrow, class, cross
+- Quality ratings for each diagram
 
 ## License
 

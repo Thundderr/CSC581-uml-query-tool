@@ -18,6 +18,11 @@ jupyterlab>=4.0.0
 ipywidgets>=8.0.0
 
 # Deep Learning
+# NOTE: The default pip install gives you CPU-only PyTorch.
+# For NVIDIA GPU (CUDA) support on Windows/Linux, install separately:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# For Mac (Apple Silicon / MPS) or CPU-only, the default works:
+#   pip install torch torchvision
 torch>=2.0.0
 torchvision>=0.15.0
 
@@ -31,6 +36,9 @@ easyocr>=1.7.0
 # Knowledge graph (Stage 3)
 networkx>=3.1
 rdflib>=6.3.0
+
+# Query engine / LLM (Stage 4 — Ollama via HTTP)
+requests>=2.28.0
 
 # UI (Stage 5)
 streamlit>=1.28.0

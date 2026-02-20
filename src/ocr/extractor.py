@@ -386,7 +386,8 @@ class UMLTextExtractor:
         Returns:
             List of detections with bbox and confidence
         """
-        results = self.detector(image, device='cpu', verbose=False)
+        from src.utils.device import get_device
+        results = self.detector(image, device=get_device(), verbose=False)
 
         detections = []
         for result in results:

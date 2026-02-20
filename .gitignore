@@ -83,6 +83,7 @@ dmypy.json
 # IDE
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~

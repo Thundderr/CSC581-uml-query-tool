@@ -45,7 +45,7 @@ class UMLKnowledgeGraphBuilder:
     def __init__(self,
                  model_path: str,
                  arrow_confidence: float = 0.3,
-                 match_distance: float = 100.0):
+                 match_distance: float = 200.0):
         """
         Initialize the graph builder.
 
@@ -143,7 +143,7 @@ class UMLKnowledgeGraphBuilder:
 
             # Match arrows to classes
             relationships = match_arrows_to_classes(
-                arrows, classes, self.match_distance
+                arrows, classes, self.match_distance, image=image
             )
 
             # Add relationship edges
