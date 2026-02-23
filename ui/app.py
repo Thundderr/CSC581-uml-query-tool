@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 from src.graph import UMLKnowledgeGraphBuilder
 from src.graph.arrow_matching import detect_arrows
 from src.ocr import UMLTextExtractor
-from src.query import GraphQAEngine
+from src.query import GraphQAEngine, GraphRAGEngine
 from src.utils import draw_overlay
 
 
@@ -70,10 +70,28 @@ with st.sidebar:
         value=os.getenv("UML_MODEL_PATH", ""),
         help="Path to trained YOLOv8 weights for UML classes/arrows.",
     )
+    qa_mode = st.selectbox(
+        "Q&A mode",
+        ["Rule-based (fast)", "LLM (Tinker)"],
+        index=0,
+        help="LLM mode uses Tinker API and can answer more free-form questions.",
+    )
     class_conf = st.slider("Class detection confidence", 0.1, 0.9, 0.5, 0.05)
     arrow_conf = st.slider("Arrow detection confidence", 0.1, 0.9, 0.3, 0.05)
     match_distance = st.slider("Arrow-to-class match distance", 20, 300, 100, 10)
     bbox_padding = st.slider("OCR bbox padding", 0, 30, 10, 2)
+    tinker_base_model = st.text_input(
+        "Tinker base model",
+        value=os.getenv("TINKER_BASE_MODEL", "Qwen/Qwen3-8B"),
+        help="Used when Q&A mode is LLM (Tinker).",
+    )
+    tinker_model_path = st.text_input(
+        "Tinker model path (optional)",
+        value=os.getenv("TINKER_MODEL_PATH", ""),
+        help="If set, overrides base model.",
+    )
+    tinker_max_tokens = st.slider("Tinker max tokens", 64, 512, 256, 32)
+    tinker_temperature = st.slider("Tinker temperature", 0.0, 1.0, 0.2, 0.05)
 
 st.write("Upload a UML class diagram and run the pipeline to extract classes, relationships, and query the graph.")
 
@@ -144,11 +162,26 @@ if "graph" in st.session_state:
     ask = st.button("Ask")
 
     if ask and question.strip():
-        engine = GraphQAEngine(graph)
-        result = engine.answer(question)
-        st.markdown("**Answer**")
-        st.write(result.answer)
-        st.markdown("**Evidence**")
-        st.code(json.dumps(result.evidence, indent=2))
-        if result.warnings:
-            st.warning("; ".join(result.warnings))
+        if qa_mode.startswith("LLM"):
+            engine = GraphRAGEngine(
+                graph,
+                llm_backend="tinker",
+                tinker_base_model=tinker_base_model or None,
+                tinker_model_path=tinker_model_path or None,
+                tinker_max_tokens=int(tinker_max_tokens),
+                tinker_temperature=float(tinker_temperature),
+            )
+            result = engine.query(question)
+            st.markdown("**Answer**")
+            st.write(result.get("answer", ""))
+            st.markdown("**Context Used**")
+            st.code(result.get("context", ""))
+        else:
+            engine = GraphQAEngine(graph)
+            result = engine.answer(question)
+            st.markdown("**Answer**")
+            st.write(result.answer)
+            st.markdown("**Evidence**")
+            st.code(json.dumps(result.evidence, indent=2))
+            if result.warnings:
+                st.warning("; ".join(result.warnings))

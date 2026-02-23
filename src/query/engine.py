@@ -1,6 +1,7 @@
-"""GraphRAG query engine using Ollama for LLM-powered UML diagram queries."""
+"""GraphRAG query engine using Ollama or Tinker for LLM-powered UML diagram queries."""
 
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -9,6 +10,11 @@ import networkx as nx
 
 
 OLLAMA_BASE_URL = "http://localhost:11434"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+
+DEFAULT_TINKER_BASE_MODEL = "Qwen/Qwen3-8B"
+DEFAULT_TINKER_MAX_TOKENS = 256
+DEFAULT_TINKER_TEMPERATURE = 0.2
 
 SYSTEM_PROMPT = """You are an expert software architect analyzing UML class diagrams.
 You answer questions about classes, their attributes, methods, and relationships
@@ -45,9 +51,24 @@ def list_ollama_models() -> List[str]:
 class GraphRAGEngine:
     """Query a UML knowledge graph using natural language via Ollama."""
 
-    def __init__(self, graph: nx.DiGraph, model_name: str = "llama3"):
+    def __init__(
+        self,
+        graph: nx.DiGraph,
+        model_name: str = "llama3",
+        llm_backend: str = "ollama",
+        tinker_base_model: Optional[str] = None,
+        tinker_model_path: Optional[str] = None,
+        tinker_max_tokens: int = DEFAULT_TINKER_MAX_TOKENS,
+        tinker_temperature: float = DEFAULT_TINKER_TEMPERATURE,
+    ):
         self.graph = graph
         self.model_name = model_name
+        self.llm_backend = llm_backend
+        self.tinker_base_model = tinker_base_model
+        self.tinker_model_path = tinker_model_path
+        self.tinker_max_tokens = tinker_max_tokens
+        self.tinker_temperature = tinker_temperature
+        self._tinker_cache = {}
         # Build lookup indexes for fast search
         self._build_index()
 
@@ -189,6 +210,64 @@ class GraphRAGEngine:
         except Exception as e:
             return f"Error: {e}"
 
+    def _load_env_file(self) -> None:
+        env_path = os.path.join(ROOT, ".env")
+        if not os.path.exists(env_path):
+            return
+        with open(env_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+
+    def _call_tinker(self, prompt: str) -> str:
+        """Send a prompt to Tinker and return the response text."""
+        self._load_env_file()
+        if not os.getenv("TINKER_API_KEY"):
+            return "Error: TINKER_API_KEY is not set."
+
+        try:
+            import tinker
+            from tinker import types
+        except Exception as exc:  # noqa: BLE001
+            return f"Error: Tinker SDK not available ({exc}). Install with: py -m pip install tinker"
+
+        cache_key = (
+            self.tinker_base_model or "",
+            self.tinker_model_path or "",
+        )
+        if cache_key not in self._tinker_cache:
+            client = tinker.ServiceClient()
+            if self.tinker_model_path:
+                sampling_client = client.create_sampling_client(model_path=self.tinker_model_path)
+            else:
+                base_model = self.tinker_base_model or os.getenv("TINKER_BASE_MODEL", DEFAULT_TINKER_BASE_MODEL)
+                sampling_client = client.create_sampling_client(base_model=base_model)
+            tokenizer = sampling_client.get_tokenizer()
+            self._tinker_cache[cache_key] = (sampling_client, tokenizer)
+
+        sampling_client, tokenizer = self._tinker_cache[cache_key]
+        prompt_tokens = tokenizer.encode(prompt)
+        model_input = types.ModelInput.from_ints(tokens=prompt_tokens)
+        params = types.SamplingParams(
+            max_tokens=self.tinker_max_tokens,
+            temperature=self.tinker_temperature,
+        )
+
+        future = sampling_client.sample(prompt=model_input, sampling_params=params, num_samples=1)
+        result = future.result()
+
+        if hasattr(result, "sequences") and result.sequences:
+            return tokenizer.decode(result.sequences[0].tokens).strip()
+        if hasattr(result, "samples") and result.samples:
+            return tokenizer.decode(result.samples[0].tokens).strip()
+        return ""
+
     def _stream_ollama(self, prompt: str, system: str = SYSTEM_PROMPT):
         """Stream tokens from Ollama. Yields (token, done) tuples."""
         payload = {
@@ -249,7 +328,10 @@ class GraphRAGEngine:
             f"Question: {question}\n\nAnswer:"
         )
 
-        answer = self._call_ollama(prompt)
+        if self.llm_backend == "tinker":
+            answer = self._call_tinker(prompt)
+        else:
+            answer = self._call_ollama(prompt)
 
         return {
             "answer": answer,

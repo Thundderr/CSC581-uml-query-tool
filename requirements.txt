@@ -38,6 +38,9 @@ networkx>=3.1
 rdflib>=6.3.0
 neo4j>=5.20.0
 
+# LLM backend (Tinker)
+tinker
+
 # Query engine / LLM (Stage 4 — Ollama via HTTP)
 requests>=2.28.0
 
