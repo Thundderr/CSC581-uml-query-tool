@@ -61,6 +61,31 @@ Upload any UML diagram image and query it with natural language:
 streamlit run app.py
 ```
 
+### Neo4j Knowledge Graph (uses `.env`)
+
+List graphs already stored in Neo4j:
+
+```bash
+py scripts/list_neo4j_graphs.py
+```
+
+Run the pipeline and store a new graph in Neo4j (no overwrite):
+
+```bash
+py scripts/run_pipeline.py \
+  --image /path/to/diagram.png \
+  --model /path/to/yolo-weights.pt \
+  --push-neo4j
+```
+
+Query a stored graph:
+
+```bash
+py scripts/query_neo4j.py \
+  --graph-id uml_YYYYMMDD_HHMMSS_xxxxxx \
+  --question "Which classes depend on OrderManager?"
+```
+
 ### Jupyter Notebooks
 
 Run the pipeline step by step:

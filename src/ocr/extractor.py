@@ -468,8 +468,12 @@ class UMLTextExtractor:
         )
 
         # PSM 6 = Assume single uniform block of text
-        text = pytesseract.image_to_string(binary, config='--psm 6')
-        return text.strip(), 0.7  # Fixed confidence for Tesseract
+        try:
+            text = pytesseract.image_to_string(binary, config='--psm 6')
+            return text.strip(), 0.7  # Fixed confidence for Tesseract
+        except Exception:
+            # Tesseract binary not installed or not in PATH.
+            return '', 0.0
 
     def extract_text(self, image: np.ndarray) -> Tuple[str, float, str]:
         """

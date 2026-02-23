@@ -35,6 +35,17 @@ from .exporters import (
     RDF_AVAILABLE,
 )
 
+from .neo4j_store import (
+    Neo4jConfig,
+    get_config,
+    get_driver,
+    ensure_schema,
+    graph_exists,
+    list_graphs,
+    upsert_graph,
+    load_graph,
+)
+
 __all__ = [
     # Arrow matching
     'ArrowEndpoints',
@@ -61,4 +72,13 @@ __all__ = [
     'export_by_image',
     'export_to_rdf',
     'RDF_AVAILABLE',
+    # Neo4j
+    'Neo4jConfig',
+    'get_config',
+    'get_driver',
+    'ensure_schema',
+    'graph_exists',
+    'list_graphs',
+    'upsert_graph',
+    'load_graph',
 ]
